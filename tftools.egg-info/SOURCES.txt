@@ -1,0 +1,7 @@
+setup.py
+tftools.py
+tftools.egg-info/PKG-INFO
+tftools.egg-info/SOURCES.txt
+tftools.egg-info/dependency_links.txt
+tftools.egg-info/requires.txt
+tftools.egg-info/top_level.txt

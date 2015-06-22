@@ -1,0 +1,10 @@
+Metadata-Version: 1.0
+Name: tftools
+Version: 0.1.0
+Summary: Utilities for optimizing transfer function excitation signals
+Home-page: http://github.com/lrp/tftools
+Author: Larry Price
+Author-email: larry.r.price@gmail.com
+License: GNU GPLv3
+Description: UNKNOWN
+Platform: UNKNOWN

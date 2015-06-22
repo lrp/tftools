@@ -1,2 +1,3 @@
 # tftools
-tools for measuring transfer functions
+
+Utilities for optimizing transfer function excitation signals

@@ -1,0 +1,156 @@
+#!/usr/bin/env python
+
+from __future__ import division
+
+import numpy as np
+import sys
+import nds2
+import awg
+from astropy.time import Time
+import scipy.signal as sig
+import datetime
+import tftools
+import ConfigParser
+import argparse
+import signal
+import os
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+#make sure the excitation gets stopped if process is interrupted
+def inthandler(signal, frame):
+    try:
+        exc.stop()
+        sys.exit(0)
+    except:
+        sys.exit(0)
+signal.signal(signal.SIGINT, inthandler)
+
+#parse the command line
+parser = argparse.ArgumentParser(description="""Create and inject optimal excitation from parameters specified in the ini file.""")
+
+parser.add_argument("-i", "--ini-file", dest='inifile', type=str,
+                    help="Name of the ini file to read the measurement parameters from.")
+args = parser.parse_args()
+inifile = args.inifile
+
+if not inifile:
+    print >>sys.stderr, 'Must specify an ini file!'
+    sys.exit(1)
+
+#parse the ini file
+config = ConfigParser.ConfigParser()
+config.read(inifile)
+host = config.get('params','nds-host')
+port = config.getint('params','nds-port')
+excchan = config.get('params','exc-chan')
+outchan = config.get('params','out-chan')
+chans = [excchan,outchan]
+duration = config.getint('params','duration')
+Fs = config.getint('params','Fs')
+Nfft = config.getint('params','Nfft')
+zeros = np.array([complex(z) for z in config.get('params','zeros').split(',')])
+poles = np.array([complex(p) for p in config.get('params','poles').split(',')])
+gain = config.getfloat('params','gain')
+maxit = config.getint('params','maxit')
+noisepsd = config.get('params','noise-psd')
+excamp = config.getfloat('params','exc-amp')
+outdir = config.get('params','out-dir')
+
+
+if outdir and not os.path.exists(outdir):
+    os.makedirs(outdir)
+elif not outdir:
+    outdir = os.cwd()
+
+#setup the transfer function as an lti object
+ltisys = sig.lti(zeros,poles,gain)
+
+if noisepsd:
+    #FIXME: implement this
+    pass
+else:
+    #no noise so make it ones
+    f = np.arange(1/Fs,Fs/2,1/Fs)
+    w = 2 * np.pi * f #angular frequencies
+    Sn = np.ones_like(f)
+
+#find the optimal frequencies
+wopt, fmsf = tftools.findfreqs(ltisys,Sn,w,nfreqs=Fs)
+#now get the optimal excitation power spectrum
+windx = np.array([np.where(w == wopt[i])[0][0] for i in range(len(wopt))])
+#fmsf = tftools.fishersf(ltisys,w,Sn)
+Sxoptdesign, optdist = tftools.optdesign(ltisys,wopt,fmsf=fmsf,maxit=maxit)#optsf)
+
+#start and end times
+ts = 1 / Fs
+tstart = int(Time(datetime.datetime.utcnow(),scale='utc').gps + 10) #NB: ten second delay seems to work pretty well...
+tend = tstart + duration
+t = np.arange(tstart,tend,ts)
+
+#make a tukey window
+window = tftools.tukeywin(len(t),1/3)
+
+#put it in the time domian
+#NB: using random phases
+xopt = np.zeros_like(t)
+#for i, wi in enumerate(w):
+#    if Sxoptdesign[i] > 0:
+#        xopt += np.sqrt(2 * Sxoptdesign[i]) * np.sin(wi * t + np.random.uniform(low=0,high=2*np.pi))
+
+for i,angindx in enumerate(windx):
+    if Sxoptdesign[i] > 0:
+        xopt += np.sqrt(2 * Sxoptdesign[i]) * np.sin(w[angindx] * t + np.random.uniform(low=0,high=2*np.pi))
+
+#amplitude
+xopt *= excamp
+
+#window it so the excitation ramps up and down
+xopt *= window
+
+#open the nds server and generate the excitation
+conn = nds2.connection(host,port)
+excFs = int(conn.find_channels(excchan)[0].sample_rate)
+exc = awg.ArbitraryLoop(excchan,xopt,rate=excFs,start=tstart)
+exc.start()
+datafiles = tftools.getrtdata(conn,chans,tstart,tend,Fs,outdir=outdir)
+exc.stop()
+
+x = np.loadtxt(datafiles[excchan],usecols=(1,))
+y = np.loadtxt(datafiles[outchan],usecols=(1,))
+
+f, tf, coh, snr = tftools.getTF(x,y,duration,Fs,Nfft)
+
+tfmag = 20 * np.log10(np.absolute(tf))
+tfphase = np.angle(tf,deg=True)
+
+genheader = '#'+excchan+'\t'+outchan+'\n'
+tfheader = '#frequency(Hz) \t magnitude(dB) \t phase(deg)\n'
+cohsnrheader = '#frequency(Hz) \t coherence \t snr\n'
+tfout = os.path.join(outdir,'tf.txt')
+cohsnrout = os.path.join(outdir,'coherence-snr.txt')
+np.savetxt(tfout,np.column_stack((f,tfmag,tfphase)),header=genheader+tfheader)
+np.savetxt(cohsnrout,np.column_stack((f,coh,snr)),header=genheader+cohsnrheader)
+
+fig, ax = plt.subplots(2,1,sharex=True)
+ax[0].semilogx(f,tfmag)
+ax[0].set_ylabel('magnitude (dB)')
+ax[0].set_title('transfer function\n ('+excchan+' / '+outchan+')')
+ax[1].semilogx(f,tfphase)
+ax[1].set_xlabel('frequency (Hz)')
+ax[1].set_ylabel('phase (deg)')
+ax[1].set_ylim([-181,181])
+ax[1].set_yticks(np.arange(-180,181,45))
+tfplot = os.path.join(outdir,'bode.pdf')
+fig.savefig(tfplot)
+
+fig, ax = plt.subplots(2,1,sharex=True)
+ax[0].semilogx(f,coh)
+ax[0].set_ylabel('coherence')
+ax[0].set_title('coherence and snr\n ('+excchan+' and '+outchan+')')
+ax[1].semilogx(f,snr)
+ax[1].set_xlabel('frequency (Hz)')
+ax[1].set_ylabel('snr')
+cohsnrplot = os.path.join(outdir,'coherence-snr.pdf')
+fig.savefig(cohsnrplot)
